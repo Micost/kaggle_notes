@@ -1,1 +1,654 @@
-{"metadata":{"language_info":{"name":"python","version":"3.10.14","mimetype":"text/x-python","codemirror_mode":{"name":"ipython","version":3},"pygments_lexer":"ipython3","nbconvert_exporter":"python","file_extension":".py"},"kernelspec":{"name":"python3","display_name":"Python 3","language":"python"},"kaggle":{"accelerator":"none","dataSources":[{"sourceId":9323836,"sourceType":"datasetVersion","datasetId":5648283},{"sourceId":9337355,"sourceType":"datasetVersion","datasetId":5658228},{"sourceId":9337863,"sourceType":"datasetVersion","datasetId":5658603},{"sourceId":9338379,"sourceType":"datasetVersion","datasetId":5658995},{"sourceId":9338614,"sourceType":"datasetVersion","datasetId":5659160}],"dockerImageVersionId":30761,"isInternetEnabled":true,"language":"python","sourceType":"notebook","isGpuEnabled":false}},"nbformat_minor":4,"nbformat":4,"cells":[{"cell_type":"markdown","source":"# Overview\n\nIn this notebook, we will process and represent time-series data. There are two important parameters\n\n## The length of time-series data\n\nDefault is 72 hours\n\n## The bucket size\n\nThe bucket size which tells in what size time windows we want to divide our time-series data. For example, if we select 2 bucket size, it will aggregate data for every 2 hours and a time-series of length 24 hours will be represented as time-series with 12 time-windows where data for every 2 hours is aggregated from original raw tim-series.\n\nWe will save the time-series data in data dictionaries in the format that can be directly used for the next step(deep learning analysis.)\n\n\n# Data Imputation\n\nThe data imputation is optional feature. It will be done by forward fill and mean or median imputation. Values will be forward fill first and if no value exists for that admission we will use mean or median value for the patient.","metadata":{}},{"cell_type":"code","source":"import polars as pl\nfrom tqdm import tqdm\nimport pickle\nimport os\nimport numpy as np\nimport warnings\n\nwarnings.simplefilter(action='ignore', category=FutureWarning)\n\nif_mort=True\nif_admn=False\nif_los=False\nfeat_cond=True # diagnosis\nfeat_proc=True # procedures\nfeat_out=True # out events\nfeat_chart=True # chart events\nfeat_med=True # medications\nimpute=False\ninclude_time=72\nbucket=1\npredW=2","metadata":{"execution":{"iopub.status.busy":"2024-09-16T07:10:33.953509Z","iopub.execute_input":"2024-09-16T07:10:33.953965Z","iopub.status.idle":"2024-09-16T07:10:33.962297Z","shell.execute_reply.started":"2024-09-16T07:10:33.953922Z","shell.execute_reply":"2024-09-16T07:10:33.960744Z"},"trusted":true},"execution_count":30,"outputs":[]},{"cell_type":"markdown","source":"# Load the base data(patient cohort)","metadata":{}},{"cell_type":"code","source":"data = pl.read_csv('/kaggle/input/mimic-iv-classification-regression-tasks/mimic_iv_classification_regression_tasks.csv')\ndata = data.with_columns([\n    pl.col('intime').str.strptime(pl.Datetime, format='%Y-%m-%d %H:%M:%S'),\n    pl.col('outtime').str.strptime(pl.Datetime, format='%Y-%m-%d %H:%M:%S')\n])\n\ndata = data.with_columns([\n    (pl.col('outtime') - pl.col('intime')).alias('los')\n])\ndata = data.with_columns([\n    pl.col('los').cast(pl.Float64) / 3600000000.0  # Convert seconds to hours\n])\ndata = data.filter(pl.col('los') > 0)\ndata = data.with_columns([\n    pl.col('Age').cast(pl.Int32),\n    pl.col('los').floor().cast(pl.Int32).alias('los') # Take the integer part of 'los'\n])\ndata = data.with_columns([\n    pl.col('intime').dt.strftime('%Y-%m-%d %H:%M:%S').alias('intime'),\n    pl.col('outtime').dt.strftime('%Y-%m-%d %H:%M:%S').alias('outtime')\n])\ndata.write_csv('mimic_iv_classification_regression_tasks.csv')","metadata":{"execution":{"iopub.status.busy":"2024-09-16T07:10:33.964962Z","iopub.execute_input":"2024-09-16T07:10:33.965773Z","iopub.status.idle":"2024-09-16T07:10:34.111498Z","shell.execute_reply.started":"2024-09-16T07:10:33.965722Z","shell.execute_reply":"2024-09-16T07:10:34.110207Z"},"trusted":true},"execution_count":31,"outputs":[]},{"cell_type":"markdown","source":"# Load all the features\n\nWe will load all the datasets in here","metadata":{}},{"cell_type":"code","source":"print(\"[ ======READING DIAGNOSIS ]\")\ncond = pl.read_csv(\"/kaggle/input/reduce-dimension-mimic-iv-v2-0-icu-diagnosis-icd10/dimension_reduce_diag_icu.csv\")\ncond = cond.filter(pl.col('stay_id').is_in(data['stay_id']))\n\n# Group by 'stay_id' and count the occurrences, then find the maximum count\ncond_per_adm = cond.group_by('stay_id').agg(pl.count('stay_id').alias('count')).select(pl.col('count').max()).to_numpy()[0][0]\n","metadata":{"execution":{"iopub.status.busy":"2024-09-16T07:10:34.113832Z","iopub.execute_input":"2024-09-16T07:10:34.114355Z","iopub.status.idle":"2024-09-16T07:10:34.319211Z","shell.execute_reply.started":"2024-09-16T07:10:34.114298Z","shell.execute_reply":"2024-09-16T07:10:34.317775Z"},"trusted":true},"execution_count":32,"outputs":[{"name":"stdout","text":"[ ======READING DIAGNOSIS ]\n","output_type":"stream"}]},{"cell_type":"code","source":"print(cond_per_adm)","metadata":{"execution":{"iopub.status.busy":"2024-09-16T07:10:34.320721Z","iopub.execute_input":"2024-09-16T07:10:34.321140Z","iopub.status.idle":"2024-09-16T07:10:34.327092Z","shell.execute_reply.started":"2024-09-16T07:10:34.321097Z","shell.execute_reply":"2024-09-16T07:10:34.325830Z"},"trusted":true},"execution_count":33,"outputs":[{"name":"stdout","text":"39\n","output_type":"stream"}]},{"cell_type":"code","source":"cond.write_csv('dimension_reduce_diag_icu.csv')","metadata":{"execution":{"iopub.status.busy":"2024-09-16T07:10:34.329665Z","iopub.execute_input":"2024-09-16T07:10:34.330094Z","iopub.status.idle":"2024-09-16T07:10:34.511259Z","shell.execute_reply.started":"2024-09-16T07:10:34.330050Z","shell.execute_reply":"2024-09-16T07:10:34.509698Z"},"trusted":true},"execution_count":34,"outputs":[]},{"cell_type":"code","source":"print(\"[ ======READING PROCEDURES ]\")\nproc = pl.read_csv(\"/kaggle/input/mimic-iv-v2-0-icu-procedures/preproc_proc_icu.csv\")\n\n\n# Filter rows based on stay_id\nproc = proc.join(\n    data.select([\"stay_id\", \"los\"]),\n    on=\"stay_id\",\n    how=\"inner\",\n)\n\n# # Split event_time_from_admit and extract start_time\nproc = proc.with_columns(\n    pl.col(\"event_time_from_admit\").str.split(\" \").alias(\"split_event_time\"),\n)\nproc = proc.with_columns([\n    pl.col(\"split_event_time\").list.last().str.split(\":\").alias('event_time'),\n    pl.col(\"split_event_time\").list.first().alias('event_days'),\n])\nproc = proc.with_columns(\n    pl.col(\"event_time\").list.get(0).alias('event_hours')\n)\nproc = proc.with_columns([\n    pl.col(\"event_days\").cast(pl.Int8).alias(\"event_days\"),\n    pl.col(\"event_hours\").cast(pl.Int8).alias(\"event_hours\"),\n])\nproc = proc.with_columns([\n    (pl.col('event_days') * 24 + pl.col('event_hours')).alias('start_time')\n])\n\nproc = proc.drop([\"split_event_time\", \"event_days\", \"event_hours\",\"event_time\"])\n\n# Filter rows with start_time >= 0 and sanity > 0\nproc = proc.filter(pl.col(\"start_time\") >= 0)\nproc = proc.with_columns((pl.col(\"los\") - pl.col(\"start_time\")).alias(\"sanity\"))\nproc = proc.filter(pl.col(\"sanity\") > 0)\nproc = proc.drop([\"sanity\"])\nfirst_row = proc.head(1)\n\nprint(first_row)","metadata":{"execution":{"iopub.status.busy":"2024-09-16T07:11:32.066383Z","iopub.execute_input":"2024-09-16T07:11:32.066921Z","iopub.status.idle":"2024-09-16T07:11:32.640645Z","shell.execute_reply.started":"2024-09-16T07:11:32.066869Z","shell.execute_reply":"2024-09-16T07:11:32.639112Z"},"trusted":true},"execution_count":38,"outputs":[{"name":"stdout","text":"[ ======READING PROCEDURES ]\nshape: (1, 9)\n┌────────────┬──────────┬──────────┬────────┬───┬────────────┬──────────────────┬─────┬────────────┐\n│ subject_id ┆ hadm_id  ┆ stay_id  ┆ itemid ┆ … ┆ intime     ┆ event_time_from_ ┆ los ┆ start_time │\n│ ---        ┆ ---      ┆ ---      ┆ ---    ┆   ┆ ---        ┆ admit            ┆ --- ┆ ---        │\n│ i64        ┆ i64      ┆ i64      ┆ i64    ┆   ┆ str        ┆ ---              ┆ i32 ┆ i8         │\n│            ┆          ┆          ┆        ┆   ┆            ┆ str              ┆     ┆            │\n╞════════════╪══════════╪══════════╪════════╪═══╪════════════╪══════════════════╪═════╪════════════╡\n│ 10000032   ┆ 29079034 ┆ 39553978 ┆ 224275 ┆ … ┆ 2180-07-23 ┆ 0 days 00:24:00  ┆ 9   ┆ 0          │\n│            ┆          ┆          ┆        ┆   ┆ 14:00:00   ┆                  ┆     ┆            │\n└────────────┴──────────┴──────────┴────────┴───┴────────────┴──────────────────┴─────┴────────────┘\n","output_type":"stream"}]},{"cell_type":"code","source":"proc.write_csv('preproc_proc_icu.csv')","metadata":{"execution":{"iopub.status.busy":"2024-09-16T07:11:37.122415Z","iopub.execute_input":"2024-09-16T07:11:37.122896Z","iopub.status.idle":"2024-09-16T07:11:37.336019Z","shell.execute_reply.started":"2024-09-16T07:11:37.122854Z","shell.execute_reply":"2024-09-16T07:11:37.334680Z"},"trusted":true},"execution_count":39,"outputs":[]},{"cell_type":"code","source":"print(\"[ ======READING OUT EVENTS ]\")\nout = pl.read_csv(\"/kaggle/input/mimic-iv-v2-0-icu-output-events-data/preproc_out_icu.csv\")\nout = out.filter(pl.col('stay_id').is_in(data['stay_id']))\nout = out.with_columns([\n    pl.col('event_time_from_admit').str.split(' ').alias('split_event_time')\n])\nout = out.with_columns([\n    (pl.col('split_event_time').arr.get(0).cast(pl.Int32) * 24 + pl.col('split_event_time').arr.get(1).str.split(':').arr.get(0).cast(pl.Int32)).alias('start_time')\n])\nout = out.filter(pl.col('start_time') >= 0)\nout = out.join(data.select(['stay_id', 'los']), on='stay_id', how='left')\nout = out.with_columns([\n    (pl.col('los') - pl.col('start_time')).alias('sanity')\n])\nout = out.filter(pl.col('sanity') > 0)\nout = out.drop('sanity')\n","metadata":{"execution":{"iopub.status.busy":"2024-09-16T07:10:35.093052Z","iopub.status.idle":"2024-09-16T07:10:35.093497Z","shell.execute_reply.started":"2024-09-16T07:10:35.093280Z","shell.execute_reply":"2024-09-16T07:10:35.093301Z"},"trusted":true},"execution_count":null,"outputs":[]},{"cell_type":"code","source":"out.write_csv('preproc_out_icu.csv', index=False)","metadata":{"execution":{"iopub.status.busy":"2024-09-16T07:10:35.095644Z","iopub.status.idle":"2024-09-16T07:10:35.096163Z","shell.execute_reply.started":"2024-09-16T07:10:35.095888Z","shell.execute_reply":"2024-09-16T07:10:35.095912Z"},"trusted":true},"execution_count":null,"outputs":[]},{"cell_type":"code","source":"print(\"[ ======READING MEDICATIONS ]\")\nmeds = pl.read_csv(\"/kaggle/input/mimic-iv-v2-0-icu-medications-data/preproc_med_icu.csv\")\nmeds = meds.with_columns([\n    pl.col('start_hours_from_admit').str.split(' ').alias('split_start_time'),\n    pl.col('stop_hours_from_admit').str.split(' ').alias('split_stop_time')\n])\nmeds = meds.with_columns([\n    (pl.col('split_start_time').arr.get(0).cast(pl.Int32) * 24 + pl.col('split_start_time').arr.get(1).str.split(':').arr.get(0).cast(pl.Int32)).alias('start_time'),\n    (pl.col('split_stop_time').arr.get(0).cast(pl.Int32) * 24 + pl.col('split_stop_time').arr.get(1).str.split(':').arr.get(0).cast(pl.Int32)).alias('stop_time')\n])\nmeds = meds.filter((pl.col('stop_time') - pl.col('start_time')) > 0)\nmeds = meds.filter(pl.col('stay_id').is_in(data['stay_id']))\nmeds = meds.join(data.select(['stay_id', 'los']), on='stay_id', how='left')\nmeds = meds.filter((pl.col('los') - pl.col('start_time')) > 0)\nmeds = meds.with_columns([\n    pl.when(pl.col('stop_time') > pl.col('los')).then(pl.col('los')).otherwise(pl.col('stop_time')).alias('stop_time')\n])\nmeds = meds.drop('los')\nmeds = meds.with_columns([\n    pl.col('rate').cast(pl.Float64),\n    pl.col('amount').cast(pl.Float64)\n])\n","metadata":{"execution":{"iopub.status.busy":"2024-09-16T07:10:35.097625Z","iopub.status.idle":"2024-09-16T07:10:35.098119Z","shell.execute_reply.started":"2024-09-16T07:10:35.097865Z","shell.execute_reply":"2024-09-16T07:10:35.097888Z"},"trusted":true},"execution_count":null,"outputs":[]},{"cell_type":"code","source":"meds.to_csv('preproc_med_icu.csv', index=False)","metadata":{"execution":{"iopub.status.busy":"2024-09-16T07:10:35.099861Z","iopub.status.idle":"2024-09-16T07:10:35.100402Z","shell.execute_reply.started":"2024-09-16T07:10:35.100164Z","shell.execute_reply":"2024-09-16T07:10:35.100189Z"},"trusted":true},"execution_count":null,"outputs":[]}]}
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "b784745d",
+   "metadata": {
+    "papermill": {
+     "duration": 0.00625,
+     "end_time": "2024-09-16T08:51:19.889852",
+     "exception": false,
+     "start_time": "2024-09-16T08:51:19.883602",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "# Overview\n",
+    "\n",
+    "In this notebook, we will process and represent time-series data. There are two important parameters\n",
+    "\n",
+    "## The length of time-series data\n",
+    "\n",
+    "Default is 72 hours\n",
+    "\n",
+    "## The bucket size\n",
+    "\n",
+    "The bucket size which tells in what size time windows we want to divide our time-series data. For example, if we select 2 bucket size, it will aggregate data for every 2 hours and a time-series of length 24 hours will be represented as time-series with 12 time-windows where data for every 2 hours is aggregated from original raw tim-series.\n",
+    "\n",
+    "We will save the time-series data in data dictionaries in the format that can be directly used for the next step(deep learning analysis.)\n",
+    "\n",
+    "\n",
+    "# Data Imputation\n",
+    "\n",
+    "The data imputation is optional feature. It will be done by forward fill and mean or median imputation. Values will be forward fill first and if no value exists for that admission we will use mean or median value for the patient."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "id": "58f18a1e",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2024-09-16T08:51:19.903301Z",
+     "iopub.status.busy": "2024-09-16T08:51:19.902834Z",
+     "iopub.status.idle": "2024-09-16T08:51:20.234818Z",
+     "shell.execute_reply": "2024-09-16T08:51:20.233564Z"
+    },
+    "papermill": {
+     "duration": 0.342175,
+     "end_time": "2024-09-16T08:51:20.237885",
+     "exception": false,
+     "start_time": "2024-09-16T08:51:19.895710",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "import polars as pl\n",
+    "from tqdm import tqdm\n",
+    "import pickle\n",
+    "import os\n",
+    "import numpy as np\n",
+    "import warnings\n",
+    "\n",
+    "warnings.simplefilter(action='ignore', category=FutureWarning)\n",
+    "\n",
+    "if_mort=True\n",
+    "if_admn=False\n",
+    "if_los=False\n",
+    "feat_cond=True # diagnosis\n",
+    "feat_proc=True # procedures\n",
+    "feat_out=True # out events\n",
+    "feat_chart=True # chart events\n",
+    "feat_med=True # medications\n",
+    "impute=False\n",
+    "include_time=72\n",
+    "bucket=1\n",
+    "predW=2"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "e08cf662",
+   "metadata": {
+    "papermill": {
+     "duration": 0.005371,
+     "end_time": "2024-09-16T08:51:20.249071",
+     "exception": false,
+     "start_time": "2024-09-16T08:51:20.243700",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "# Load the base data(patient cohort)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "id": "3c1270c0",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2024-09-16T08:51:20.262229Z",
+     "iopub.status.busy": "2024-09-16T08:51:20.261757Z",
+     "iopub.status.idle": "2024-09-16T08:51:20.749285Z",
+     "shell.execute_reply": "2024-09-16T08:51:20.747906Z"
+    },
+    "papermill": {
+     "duration": 0.497386,
+     "end_time": "2024-09-16T08:51:20.752095",
+     "exception": false,
+     "start_time": "2024-09-16T08:51:20.254709",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "data = pl.read_csv('/kaggle/input/mimic-iv-classification-regression-tasks/mimic_iv_classification_regression_tasks.csv')\n",
+    "data = data.with_columns([\n",
+    "    pl.col('intime').str.strptime(pl.Datetime, format='%Y-%m-%d %H:%M:%S'),\n",
+    "    pl.col('outtime').str.strptime(pl.Datetime, format='%Y-%m-%d %H:%M:%S')\n",
+    "])\n",
+    "\n",
+    "data = data.with_columns([\n",
+    "    (pl.col('outtime') - pl.col('intime')).alias('los')\n",
+    "])\n",
+    "data = data.with_columns([\n",
+    "    pl.col('los').cast(pl.Float64) / 3600000000.0  # Convert seconds to hours\n",
+    "])\n",
+    "data = data.filter(pl.col('los') > 0)\n",
+    "data = data.with_columns([\n",
+    "    pl.col('Age').cast(pl.Int32),\n",
+    "    pl.col('los').floor().cast(pl.Int32).alias('los') # Take the integer part of 'los'\n",
+    "])\n",
+    "data = data.with_columns([\n",
+    "    pl.col('intime').dt.strftime('%Y-%m-%d %H:%M:%S').alias('intime'),\n",
+    "    pl.col('outtime').dt.strftime('%Y-%m-%d %H:%M:%S').alias('outtime')\n",
+    "])\n",
+    "data.write_csv('mimic_iv_classification_regression_tasks.csv')"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "38d4f6cc",
+   "metadata": {
+    "papermill": {
+     "duration": 0.005752,
+     "end_time": "2024-09-16T08:51:20.763528",
+     "exception": false,
+     "start_time": "2024-09-16T08:51:20.757776",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "# Load all the features\n",
+    "\n",
+    "We will load all the datasets in here"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "id": "854324e2",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2024-09-16T08:51:20.777005Z",
+     "iopub.status.busy": "2024-09-16T08:51:20.776577Z",
+     "iopub.status.idle": "2024-09-16T08:51:21.273952Z",
+     "shell.execute_reply": "2024-09-16T08:51:21.272636Z"
+    },
+    "papermill": {
+     "duration": 0.507613,
+     "end_time": "2024-09-16T08:51:21.277147",
+     "exception": false,
+     "start_time": "2024-09-16T08:51:20.769534",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "[ ======READING DIAGNOSIS ]\n"
+     ]
+    }
+   ],
+   "source": [
+    "print(\"[ ======READING DIAGNOSIS ]\")\n",
+    "cond = pl.read_csv(\"/kaggle/input/reduce-dimension-mimic-iv-v2-0-icu-diagnosis-icd10/dimension_reduce_diag_icu.csv\")\n",
+    "cond = cond.filter(pl.col('stay_id').is_in(data['stay_id']))\n",
+    "\n",
+    "# Group by 'stay_id' and count the occurrences, then find the maximum count\n",
+    "cond_per_adm = cond.group_by('stay_id').agg(pl.count('stay_id').alias('count')).select(pl.col('count').max()).to_numpy()[0][0]\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "id": "9d16e95c",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2024-09-16T08:51:21.292028Z",
+     "iopub.status.busy": "2024-09-16T08:51:21.291350Z",
+     "iopub.status.idle": "2024-09-16T08:51:21.298548Z",
+     "shell.execute_reply": "2024-09-16T08:51:21.297126Z"
+    },
+    "papermill": {
+     "duration": 0.017821,
+     "end_time": "2024-09-16T08:51:21.301230",
+     "exception": false,
+     "start_time": "2024-09-16T08:51:21.283409",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "39\n"
+     ]
+    }
+   ],
+   "source": [
+    "print(cond_per_adm)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "id": "ee8d465c",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2024-09-16T08:51:21.315595Z",
+     "iopub.status.busy": "2024-09-16T08:51:21.314456Z",
+     "iopub.status.idle": "2024-09-16T08:51:21.469992Z",
+     "shell.execute_reply": "2024-09-16T08:51:21.468630Z"
+    },
+    "papermill": {
+     "duration": 0.165533,
+     "end_time": "2024-09-16T08:51:21.472753",
+     "exception": false,
+     "start_time": "2024-09-16T08:51:21.307220",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "cond.write_csv('dimension_reduce_diag_icu.csv')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "id": "15c300f8",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2024-09-16T08:51:21.487346Z",
+     "iopub.status.busy": "2024-09-16T08:51:21.485984Z",
+     "iopub.status.idle": "2024-09-16T08:51:22.592657Z",
+     "shell.execute_reply": "2024-09-16T08:51:22.591123Z"
+    },
+    "papermill": {
+     "duration": 1.116775,
+     "end_time": "2024-09-16T08:51:22.595357",
+     "exception": false,
+     "start_time": "2024-09-16T08:51:21.478582",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "[ ======READING PROCEDURES ]\n",
+      "shape: (1, 9)\n",
+      "┌────────────┬──────────┬──────────┬────────┬───┬────────────┬──────────────────┬─────┬────────────┐\n",
+      "│ subject_id ┆ hadm_id  ┆ stay_id  ┆ itemid ┆ … ┆ intime     ┆ event_time_from_ ┆ los ┆ start_time │\n",
+      "│ ---        ┆ ---      ┆ ---      ┆ ---    ┆   ┆ ---        ┆ admit            ┆ --- ┆ ---        │\n",
+      "│ i64        ┆ i64      ┆ i64      ┆ i64    ┆   ┆ str        ┆ ---              ┆ i32 ┆ i8         │\n",
+      "│            ┆          ┆          ┆        ┆   ┆            ┆ str              ┆     ┆            │\n",
+      "╞════════════╪══════════╪══════════╪════════╪═══╪════════════╪══════════════════╪═════╪════════════╡\n",
+      "│ 10000032   ┆ 29079034 ┆ 39553978 ┆ 224275 ┆ … ┆ 2180-07-23 ┆ 0 days 00:24:00  ┆ 9   ┆ 0          │\n",
+      "│            ┆          ┆          ┆        ┆   ┆ 14:00:00   ┆                  ┆     ┆            │\n",
+      "└────────────┴──────────┴──────────┴────────┴───┴────────────┴──────────────────┴─────┴────────────┘\n"
+     ]
+    }
+   ],
+   "source": [
+    "print(\"[ ======READING PROCEDURES ]\")\n",
+    "proc = pl.read_csv(\"/kaggle/input/mimic-iv-v2-0-icu-procedures/preproc_proc_icu.csv\")\n",
+    "\n",
+    "\n",
+    "# Filter rows based on stay_id\n",
+    "proc = proc.join(\n",
+    "    data.select([\"stay_id\", \"los\"]),\n",
+    "    on=\"stay_id\",\n",
+    "    how=\"inner\",\n",
+    ")\n",
+    "\n",
+    "# # Split event_time_from_admit and extract start_time\n",
+    "proc = proc.with_columns(\n",
+    "    pl.col(\"event_time_from_admit\").str.split(\" \").alias(\"split_event_time\"),\n",
+    ")\n",
+    "proc = proc.with_columns([\n",
+    "    pl.col(\"split_event_time\").list.last().str.split(\":\").alias('event_time'),\n",
+    "    pl.col(\"split_event_time\").list.first().alias('event_days'),\n",
+    "])\n",
+    "proc = proc.with_columns(\n",
+    "    pl.col(\"event_time\").list.get(0).alias('event_hours')\n",
+    ")\n",
+    "proc = proc.with_columns([\n",
+    "    pl.col(\"event_days\").cast(pl.Int8).alias(\"event_days\"),\n",
+    "    pl.col(\"event_hours\").cast(pl.Int8).alias(\"event_hours\"),\n",
+    "])\n",
+    "proc = proc.with_columns([\n",
+    "    (pl.col('event_days') * 24 + pl.col('event_hours')).alias('start_time')\n",
+    "])\n",
+    "\n",
+    "proc = proc.drop([\"split_event_time\", \"event_days\", \"event_hours\",\"event_time\"])\n",
+    "\n",
+    "# Filter rows with start_time >= 0 and sanity > 0\n",
+    "proc = proc.filter(pl.col(\"start_time\") >= 0)\n",
+    "proc = proc.with_columns((pl.col(\"los\") - pl.col(\"start_time\")).alias(\"sanity\"))\n",
+    "proc = proc.filter(pl.col(\"sanity\") > 0)\n",
+    "proc = proc.drop([\"sanity\"])\n",
+    "first_row = proc.head(1)\n",
+    "\n",
+    "print(first_row)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "id": "47d09f69",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2024-09-16T08:51:22.610820Z",
+     "iopub.status.busy": "2024-09-16T08:51:22.609702Z",
+     "iopub.status.idle": "2024-09-16T08:51:22.770329Z",
+     "shell.execute_reply": "2024-09-16T08:51:22.769113Z"
+    },
+    "papermill": {
+     "duration": 0.171763,
+     "end_time": "2024-09-16T08:51:22.773404",
+     "exception": false,
+     "start_time": "2024-09-16T08:51:22.601641",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "proc.write_csv('preproc_proc_icu.csv')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "id": "ea34bce2",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2024-09-16T08:51:22.788237Z",
+     "iopub.status.busy": "2024-09-16T08:51:22.787736Z",
+     "iopub.status.idle": "2024-09-16T08:51:27.234168Z",
+     "shell.execute_reply": "2024-09-16T08:51:27.232284Z"
+    },
+    "papermill": {
+     "duration": 4.457294,
+     "end_time": "2024-09-16T08:51:27.237049",
+     "exception": false,
+     "start_time": "2024-09-16T08:51:22.779755",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "[ ======READING OUT EVENTS ]\n",
+      "shape: (1, 8)\n",
+      "┌────────────┬──────────┬──────────┬────────┬─────────────┬─────────────┬─────────────┬────────────┐\n",
+      "│ subject_id ┆ hadm_id  ┆ stay_id  ┆ itemid ┆ charttime   ┆ intime      ┆ event_time_ ┆ start_time │\n",
+      "│ ---        ┆ ---      ┆ ---      ┆ ---    ┆ ---         ┆ ---         ┆ from_admit  ┆ ---        │\n",
+      "│ i64        ┆ i64      ┆ i64      ┆ i64    ┆ str         ┆ str         ┆ ---         ┆ i16        │\n",
+      "│            ┆          ┆          ┆        ┆             ┆             ┆ str         ┆            │\n",
+      "╞════════════╪══════════╪══════════╪════════╪═════════════╪═════════════╪═════════════╪════════════╡\n",
+      "│ 10000032   ┆ 29079034 ┆ 39553978 ┆ 226560 ┆ 2180-07-23  ┆ 2180-07-23  ┆ 0 days      ┆ 1          │\n",
+      "│            ┆          ┆          ┆        ┆ 15:00:00    ┆ 14:00:00    ┆ 01:00:00    ┆            │\n",
+      "└────────────┴──────────┴──────────┴────────┴─────────────┴─────────────┴─────────────┴────────────┘\n"
+     ]
+    }
+   ],
+   "source": [
+    "print(\"[ ======READING OUT EVENTS ]\")\n",
+    "out = pl.read_csv(\"/kaggle/input/mimic-iv-v2-0-icu-output-events-data/preproc_out_icu.csv\")\n",
+    "out = out.filter(pl.col('stay_id').is_in(data['stay_id']))\n",
+    "out = out.with_columns(\n",
+    "    pl.col(\"event_time_from_admit\").str.split(\" \").alias(\"split_event_time\"),\n",
+    ")\n",
+    "out = out.with_columns([\n",
+    "    pl.col(\"split_event_time\").list.last().str.split(\":\").alias('event_time'),\n",
+    "    pl.col(\"split_event_time\").list.first().alias('event_days'),\n",
+    "])\n",
+    "out = out.with_columns(\n",
+    "    pl.col(\"event_time\").list.get(0).alias('event_hours')\n",
+    ")\n",
+    "out = out.with_columns([\n",
+    "    pl.col(\"event_days\").cast(pl.Int16).alias(\"event_days\"),\n",
+    "    pl.col(\"event_hours\").cast(pl.Int16).alias(\"event_hours\"),\n",
+    "])\n",
+    "out = out.with_columns([\n",
+    "    (pl.col('event_days') * 24 + pl.col('event_hours')).alias('start_time')\n",
+    "])\n",
+    "\n",
+    "out = out.drop([\"split_event_time\", \"event_days\", \"event_hours\",\"event_time\"])\n",
+    "\n",
+    "# Filter rows with start_time >= 0 and sanity > 0\n",
+    "# out = out.filter(pl.col(\"start_time\") >= 0)\n",
+    "# out = out.with_columns((pl.col(\"los\") - pl.col(\"start_time\")).alias(\"sanity\"))\n",
+    "# out = out.filter(pl.col(\"sanity\") > 0)\n",
+    "# out = out.drop([\"sanity\"])\n",
+    "first_row = out.head(1)\n",
+    "\n",
+    "print(first_row)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 9,
+   "id": "032f0a20",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2024-09-16T08:51:27.253629Z",
+     "iopub.status.busy": "2024-09-16T08:51:27.252483Z",
+     "iopub.status.idle": "2024-09-16T08:51:28.499380Z",
+     "shell.execute_reply": "2024-09-16T08:51:28.498002Z"
+    },
+    "papermill": {
+     "duration": 1.258553,
+     "end_time": "2024-09-16T08:51:28.502337",
+     "exception": false,
+     "start_time": "2024-09-16T08:51:27.243784",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "out.write_csv('preproc_out_icu.csv')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "id": "e1171fc9",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2024-09-16T08:51:28.517588Z",
+     "iopub.status.busy": "2024-09-16T08:51:28.517115Z",
+     "iopub.status.idle": "2024-09-16T08:51:34.048370Z",
+     "shell.execute_reply": "2024-09-16T08:51:34.046673Z"
+    },
+    "papermill": {
+     "duration": 5.542512,
+     "end_time": "2024-09-16T08:51:34.051516",
+     "exception": false,
+     "start_time": "2024-09-16T08:51:28.509004",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "[ ======READING MEDICATIONS ]\n",
+      "shape: (1, 13)\n",
+      "┌────────────┬──────────┬──────────┬────────┬───┬───────────┬─────────┬────────────┬───────────┐\n",
+      "│ subject_id ┆ hadm_id  ┆ stay_id  ┆ itemid ┆ … ┆ amount    ┆ orderid ┆ start_time ┆ stop_time │\n",
+      "│ ---        ┆ ---      ┆ ---      ┆ ---    ┆   ┆ ---       ┆ ---     ┆ ---        ┆ ---       │\n",
+      "│ i64        ┆ i64      ┆ i64      ┆ i64    ┆   ┆ f64       ┆ i64     ┆ i16        ┆ i16       │\n",
+      "╞════════════╪══════════╪══════════╪════════╪═══╪═══════════╪═════════╪════════════╪═══════════╡\n",
+      "│ 10000032   ┆ 29079034 ┆ 39553978 ┆ 220862 ┆ … ┆ 49.999999 ┆ 427849  ┆ 3          ┆ 4         │\n",
+      "└────────────┴──────────┴──────────┴────────┴───┴───────────┴─────────┴────────────┴───────────┘\n"
+     ]
+    }
+   ],
+   "source": [
+    "print(\"[ ======READING MEDICATIONS ]\")\n",
+    "meds = pl.read_csv(\"/kaggle/input/mimic-iv-v2-0-icu-medications-data/preproc_med_icu.csv\")\n",
+    "meds = meds.filter(pl.col('stay_id').is_in(data['stay_id']))\n",
+    "meds = meds.with_columns(\n",
+    "    pl.col(\"start_hours_from_admit\").str.split(\" \").alias(\"split_start_time\"),\n",
+    ")\n",
+    "meds = meds.with_columns([\n",
+    "    pl.col(\"split_start_time\").list.last().str.split(\":\").alias('start_time_admit'),\n",
+    "    pl.col(\"split_start_time\").list.first().alias('start_days'),\n",
+    "])\n",
+    "meds = meds.with_columns(\n",
+    "    pl.col(\"start_time_admit\").list.get(0).alias('start_hours')\n",
+    ")\n",
+    "meds = meds.with_columns([\n",
+    "    pl.col(\"start_days\").cast(pl.Int16).alias(\"start_days\"),\n",
+    "    pl.col(\"start_hours\").cast(pl.Int16).alias(\"start_hours\"),\n",
+    "])\n",
+    "meds = meds.with_columns([\n",
+    "    (pl.col('start_days') * 24 + pl.col('start_hours')).alias('start_time')\n",
+    "])\n",
+    "\n",
+    "# find out stop time\n",
+    "meds = meds.with_columns(\n",
+    "    pl.col(\"stop_hours_from_admit\").str.split(\" \").alias(\"split_stop_time\"),\n",
+    ")\n",
+    "meds = meds.with_columns([\n",
+    "    pl.col(\"split_stop_time\").list.last().str.split(\":\").alias('stop_time_admit'),\n",
+    "    pl.col(\"split_stop_time\").list.first().alias('stop_days'),\n",
+    "])\n",
+    "meds = meds.with_columns(\n",
+    "    pl.col(\"stop_time_admit\").list.get(0).alias('stop_hours')\n",
+    ")\n",
+    "meds = meds.with_columns([\n",
+    "    pl.col(\"stop_days\").cast(pl.Int16).alias(\"stop_days\"),\n",
+    "    pl.col(\"stop_hours\").cast(pl.Int16).alias(\"stop_hours\"),\n",
+    "])\n",
+    "meds = meds.with_columns([\n",
+    "    (pl.col('stop_days') * 24 + pl.col('stop_hours')).alias('stop_time')\n",
+    "])\n",
+    "\n",
+    "meds = meds.drop([\"split_start_time\", \"start_days\", \"start_hours\",\"start_time_admit\",\"split_stop_time\", \"stop_days\", \"stop_hours\",\"stop_time_admit\"])\n",
+    "\n",
+    "meds = meds.with_columns((pl.col(\"stop_time\") - pl.col(\"start_time\")).alias(\"sanity\"))\n",
+    "meds = meds.filter(pl.col(\"sanity\") > 0)\n",
+    "meds = meds.drop([\"sanity\"])\n",
+    "\n",
+    "# meds = meds.with_columns((pl.col(\"los\") - pl.col(\"start_time\")).alias(\"sanity\"))\n",
+    "# meds = meds.filter(pl.col(\"sanity\") > 0)\n",
+    "# meds = meds.drop([\"sanity\"])\n",
+    "meds = meds.with_columns([\n",
+    "    pl.col('rate').cast(pl.Float64).alias('rate'),\n",
+    "    pl.col('amount').cast(pl.Float64).alias('amount')\n",
+    "])\n",
+    "first_row = meds.head(1)\n",
+    "print(first_row)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 11,
+   "id": "92ea5174",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2024-09-16T08:51:34.067298Z",
+     "iopub.status.busy": "2024-09-16T08:51:34.066772Z",
+     "iopub.status.idle": "2024-09-16T08:51:35.917712Z",
+     "shell.execute_reply": "2024-09-16T08:51:35.916563Z"
+    },
+    "papermill": {
+     "duration": 1.862444,
+     "end_time": "2024-09-16T08:51:35.920680",
+     "exception": false,
+     "start_time": "2024-09-16T08:51:34.058236",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "meds.write_csv('preproc_med_icu.csv')"
+   ]
+  }
+ ],
+ "metadata": {
+  "kaggle": {
+   "accelerator": "none",
+   "dataSources": [
+    {
+     "datasetId": 5648283,
+     "sourceId": 9323836,
+     "sourceType": "datasetVersion"
+    },
+    {
+     "datasetId": 5658228,
+     "sourceId": 9337355,
+     "sourceType": "datasetVersion"
+    },
+    {
+     "datasetId": 5658603,
+     "sourceId": 9337863,
+     "sourceType": "datasetVersion"
+    },
+    {
+     "datasetId": 5658995,
+     "sourceId": 9338379,
+     "sourceType": "datasetVersion"
+    },
+    {
+     "datasetId": 5659160,
+     "sourceId": 9338614,
+     "sourceType": "datasetVersion"
+    }
+   ],
+   "dockerImageVersionId": 30761,
+   "isGpuEnabled": false,
+   "isInternetEnabled": true,
+   "language": "python",
+   "sourceType": "notebook"
+  },
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.10.14"
+  },
+  "papermill": {
+   "default_parameters": {},
+   "duration": 19.825984,
+   "end_time": "2024-09-16T08:51:36.551030",
+   "environment_variables": {},
+   "exception": null,
+   "input_path": "__notebook__.ipynb",
+   "output_path": "__notebook__.ipynb",
+   "parameters": {},
+   "start_time": "2024-09-16T08:51:16.725046",
+   "version": "2.6.0"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
